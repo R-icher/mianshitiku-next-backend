@@ -3,6 +3,7 @@ package com.ryy.mianshitiku.controller;
 import com.alibaba.csp.sentinel.annotation.SentinelResource;
 import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeException;
+import com.alibaba.fastjson.JSON;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.jd.platform.hotkey.client.callback.JdHotKeyStore;
 import com.ryy.mianshitiku.annotation.AuthCheck;
@@ -28,10 +29,13 @@ import com.ryy.mianshitiku.service.QuestionService;
 import com.ryy.mianshitiku.service.UserService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 题库接口
@@ -49,6 +53,9 @@ public class QuestionBankController {
 
     @Resource
     private QuestionService questionService;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     // region 增删改查
 
@@ -150,10 +157,19 @@ public class QuestionBankController {
         String key = "bank_detail_" + id;
         // 判断拿到的 key，即题库是否为热 key
         if(JdHotKeyStore.isHotKey(key)){
-            // 先尝试从本地缓存中取值，避免走后续的数据库或分布式缓存查询。
-            Object cachedQuestionBankVO = JdHotKeyStore.get(key);
-            // 如果本地缓存中有值，直接返回缓存的值
-            return ResultUtils.success((QuestionBankVO) cachedQuestionBankVO);
+
+//            Object cachedQuestionBankVO = JdHotKeyStore.get(key);
+//            if (cachedQuestionBankVO != null) {
+//                return ResultUtils.success((QuestionBankVO) cachedQuestionBankVO);
+//            }
+
+            // 检查分布式缓存 Redis 中是否有热key 的缓存数据
+            String cacheJson = redisTemplate.opsForValue().get(key);
+            // 缓存中的值还没过期，可以直接从缓存中获取值
+            if(cacheJson != null){
+                QuestionBankVO cachedVO = JSON.parseObject(cacheJson, QuestionBankVO.class);
+                return ResultUtils.success(cachedVO);
+            }
         }
 
         // 根据题库 id 获取到题库对象
@@ -173,7 +189,10 @@ public class QuestionBankController {
         }
 
         // 根据当前的热点 Key 列表，决定是否要把刚查到的数据放到本地缓存。
-        JdHotKeyStore.smartSet(key, questionBankVO);
+//        JdHotKeyStore.smartSet(key, questionBankVO);
+
+        // 由于先前没有在分布式缓存中找到热key，因此在这里直接把这个 key 存储到redis中，并设置10分钟的过期时间
+        redisTemplate.opsForValue().set(key, JSON.toJSONString(questionBankVO), 10, TimeUnit.MINUTES);
 
         // 获取封装类
         return ResultUtils.success(questionBankVO);

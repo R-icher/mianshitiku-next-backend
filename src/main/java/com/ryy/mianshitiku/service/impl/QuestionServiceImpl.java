@@ -29,10 +29,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.elasticsearch.index.query.BoolQueryBuilder;
+import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.search.sort.SortBuilder;
-import org.elasticsearch.search.sort.SortBuilders;
-import org.elasticsearch.search.sort.SortOrder;
+import org.elasticsearch.search.sort.*;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.elasticsearch.core.ElasticsearchRestTemplate;
 import org.springframework.data.elasticsearch.core.SearchHit;
@@ -253,6 +252,99 @@ public class QuestionServiceImpl extends ServiceImpl<QuestionMapper, Question> i
         return questionPage;
     }
 
+
+    /**
+     * 前端调用该接口从 Es 中查询题目
+     */
+    public Page<Question> searchFromES(QuestionQueryRequest questionQueryRequest) {
+        // 获取参数
+        Long id = questionQueryRequest.getId();
+        Long notId = questionQueryRequest.getNotId();
+        String searchText = questionQueryRequest.getSearchText();
+        List<String> tags = questionQueryRequest.getTags();
+        Long questionBankId = questionQueryRequest.getQuestionBankId();
+        Long userId = questionQueryRequest.getUserId();
+
+        // Es 的起始页是从第0页开始
+        int current = questionQueryRequest.getCurrent() - 1;
+        int pageSize = questionQueryRequest.getPageSize();
+        String sortField = questionQueryRequest.getSortField();
+        String sortOrder = questionQueryRequest.getSortOrder();
+
+        // 构造一个查询条件，相当于一个容器（类似 queryWrapper）
+        BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
+        // 先统一过滤掉已删除的数据，filter 用于精确匹配
+        boolQueryBuilder.filter(QueryBuilders.termQuery("isDelete", 0));
+
+        // termQuery：对字段做精确匹配
+        // mustNot：排除某些 id
+        if(id != null) {
+            boolQueryBuilder.filter(QueryBuilders.termQuery("id", id));
+        }
+        if(notId != null){
+            boolQueryBuilder.mustNot(QueryBuilders.termQuery("id", notId));
+        }
+        if (userId != null) {
+            boolQueryBuilder.filter(QueryBuilders.termQuery("userId", userId));
+        }
+        if (questionBankId != null) {
+            boolQueryBuilder.filter(QueryBuilders.termQuery("questionBankId", questionBankId));
+        }
+
+        // 由于标签是固定的，因此也采用精确查询
+        if(CollUtil.isNotEmpty(tags)) {
+            for (String tag : tags) {
+                boolQueryBuilder.filter(QueryBuilders.termQuery("tags", tag));
+            }
+        }
+
+        // 按关键字全文检索
+        if(StringUtils.isNotBlank(searchText)) {
+            // should 子句：表示“至少符合一个就行”，但不会像 filter 那样完全排除不匹配的文档，而是通过评分衡量相关度。
+            // matchQuery 方法用于全文检索
+            // 分别在 title, content, answer 三个字段中查找用户输入的查找条件 searchText
+            boolQueryBuilder.should(QueryBuilders.matchQuery("title", searchText));
+            boolQueryBuilder.should(QueryBuilders.matchQuery("content", searchText));
+            boolQueryBuilder.should(QueryBuilders.matchQuery("answer", searchText));
+            // minimumShouldMatch(1)：至少要命中一个 should 子句，才能被认为匹配。
+            boolQueryBuilder.minimumShouldMatch(1);
+        }
+
+        // 默认按照 ElasticSearch 自带的 _score 排序（相关度）
+        SortBuilder<?> sortBuilder = SortBuilders.scoreSort();
+        if(StringUtils.isNotBlank(sortField)){
+             sortBuilder = SortBuilders.fieldSort(sortField);
+             // 查看是否符合用户需要的排序逻辑
+             sortBuilder.order(CommonConstant.SORT_ORDER_ASC.equals(sortOrder) ? SortOrder.ASC : SortOrder.DESC);
+        }
+
+        // 分页
+        PageRequest pageRequest = PageRequest.of(current, pageSize);
+        // 把前面拼好的查询条件、分页、排序整合到一个 NativeSearchQuery 对象里。
+        NativeSearchQuery searchQuery = new NativeSearchQueryBuilder()
+                .withQuery(boolQueryBuilder)
+                .withPageable(pageRequest)
+                .withSorts(sortBuilder)
+                .build();
+
+        // 执行查询并拿回一批 QuestionEsDTO
+        SearchHits<QuestionEsDTO> searchHits = elasticsearchRestTemplate.search(searchQuery, QuestionEsDTO.class);
+
+        // 复用 mySql 的分页对象，分页封装返回结果
+        Page<Question> page = new Page<>();
+        // 将命中的总记录数给到分页对象
+        page.setTotal(searchHits.getTotalHits());
+
+        List<Question> resourceList = new ArrayList<>();
+        if (searchHits.hasSearchHits()) {
+            List<SearchHit<QuestionEsDTO>> searchHitList = searchHits.getSearchHits();
+            for (SearchHit<QuestionEsDTO> questionEsDTOSearchHit : searchHitList) {
+                resourceList.add(QuestionEsDTO.dtoToObj(questionEsDTOSearchHit.getContent()));
+            }
+        }
+        page.setRecords(resourceList);
+        return page;
+    }
 
 
     /**

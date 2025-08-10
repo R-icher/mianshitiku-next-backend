@@ -52,7 +52,7 @@ public class NacosListener implements InitializingBean {
                 return executorService;
             }
 
-            // 监听后续黑名单变化
+            // 监听后续黑名单变化，当黑名单发生变化，就会调用该方法
             @Override
             public void receiveConfigInfo(String configInfo) {
                 log.info("监听到配置信息变化：{}", configInfo);
